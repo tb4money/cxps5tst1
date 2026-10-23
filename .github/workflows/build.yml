@@ -1,0 +1,67 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach cxps5.elf to a release on tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld zlib1g-dev python3 zip
+
+      # Host build + API tests against a fake game folder (no console needed).
+      - name: Host tests
+        run: make test
+
+      - name: Install ps5-payload-sdk
+        run: |
+          wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
+          sudo unzip -q -d /opt ps5-payload-sdk.zip
+          echo "PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk" >> "$GITHUB_ENV"
+          ls /opt/ps5-payload-sdk/target/user/homebrew/include 2>/dev/null | head -30 || true
+
+      # Uses libcurl for link downloads when the SDK ships the port, otherwise builds without it.
+      - name: Build cxps5.elf
+        run: |
+          if [ -f "$PS5_PAYLOAD_SDK/target/user/homebrew/include/curl/curl.h" ]; then
+            make
+          else
+            echo "::warning::SDK has no curl port, building with NO_CURL=1 (upload only, no link downloads)"
+            make NO_CURL=1
+          fi
+          ls -l cxps5.elf
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp cxps5.elf config.ini.example README.md dist/
+          sh scripts/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cxps5
+          path: |
+            dist/cxps5.elf
+            dist/config.ini.example
+            dist/cxps5-*-src.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/cxps5.elf
+            dist/config.ini.example
+            dist/cxps5-*-src.zip
